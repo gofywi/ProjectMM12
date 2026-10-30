@@ -42,5 +42,3 @@ Sign in and follow the app's model download flow to use AI chat. Model downloads
 npm test
 npm run lint
 ```
-
-For release builds, configure the `SUMZ_UPLOAD_STORE_FILE`, `SUMZ_UPLOAD_KEY_ALIAS`, `SUMZ_UPLOAD_STORE_PASSWORD`, and `SUMZ_UPLOAD_KEY_PASSWORD` properties privately in your user Gradle properties. Keep signing keys and passwords out of Git.
