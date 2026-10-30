@@ -34,8 +34,6 @@ Sumz is a React Native Android app for AI chat and document-based conversations.
    npm run android
    ```
 
-Sign in and follow the app's model download flow to use AI chat. Model downloads and cloud features require access to the configured Firebase backend. Backend sources are included in `functions/` and `dataconnect/`; cloning the app does not provision those services.
-
 ## Useful commands
 
 ```sh
