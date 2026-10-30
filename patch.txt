@@ -1,0 +1,101 @@
+================================================================================
+PATCHES APPLIED TO NODE_MODULES
+================================================================================
+
+Date: 2026-02-12
+Managed by: patch-package (automatically applied via postinstall script)
+
+--------------------------------------------------------------------------------
+PATCH 1: react-native-safe-area-context v5.5.2
+--------------------------------------------------------------------------------
+
+File: patches/react-native-safe-area-context+5.5.2.patch
+
+ISSUE:
+CMake build failure when building Android app with React Native 0.84.0 and
+new architecture enabled (newArchEnabled=true). The build failed with linker
+errors for undefined C++ standard library symbols:
+  - std::__ndk1::basic_string
+  - operator delete(void*)
+  - operator new(unsigned long)
+  - __cxa_guard_acquire/release
+  - vtable symbols
+
+ROOT CAUSE:
+The library's CMakeLists.txt was missing the C++ standard library (c++_shared)
+in its target_link_libraries configuration.
+
+FIX:
+Modified: node_modules/react-native-safe-area-context/android/src/main/jni/CMakeLists.txt
+Added 'c++_shared' to both target_link_libraries blocks (lines 36 and 44)
+
+VERIFICATION:
+✓ Build completes successfully: gradlew assembleDebug (exit code 0)
+✓ All architectures build: arm64-v8a, armeabi-v7a, x86, x86_64
+✓ New architecture remains enabled for optimal performance
+
+PERSISTENCE:
+- Patch file created in patches/ directory
+- postinstall script added to package.json
+- Patch automatically applies after npm install/npm ci
+
+NOTES:
+This is a temporary fix until react-native-safe-area-context releases an
+official update with proper C++ standard library linkage for RN 0.84.0+
+
+--------------------------------------------------------------------------------
+PATCH 2: react-native-screens v4.23.0
+--------------------------------------------------------------------------------
+
+File: patches/react-native-screens+4.23.0.patch
+Date: 2026-02-21
+
+CONTEXT:
+react-native-screens is a required peer dependency of @react-navigation/native-stack.
+It was not explicitly listed in package.json and was added when setting up navigation
+(Theme System / Settings Screen feature).
+
+ISSUE:
+Same C++ stdlib linker error as Patch 1, but affecting TWO separate CMakeLists.txt
+files within react-native-screens. Build failed with:
+  - undefined symbol: typeinfo for std::out_of_range
+  - undefined symbol: std::__ndk1::__shared_weak_count::__get_deleter
+  - undefined symbol: std::__ndk1::__throw_out_of_range
+Referenced by: RNScreensTurboModule.cpp and codegen components (RNSScreenShadowNode etc.)
+
+ROOT CAUSE:
+Both CMakeLists.txt files were missing c++_shared linkage:
+  1. android/CMakeLists.txt           — builds rnscreens target (RNScreensTurboModule.cpp)
+  2. android/src/main/jni/CMakeLists.txt — builds react_codegen_rnscreens target
+
+FIX:
+Modified: node_modules/react-native-screens/android/CMakeLists.txt
+  Added 'c++_shared' to target_link_libraries for both RNS_NEW_ARCH_ENABLED=true
+  and RNS_NEW_ARCH_ENABLED=false branches.
+
+Modified: node_modules/react-native-screens/android/src/main/jni/CMakeLists.txt
+  Added 'c++_shared' to the single target_link_libraries block.
+
+ADDITIONAL STEPS:
+  - Deleted stale CMake/Gradle build cache for react-native-screens:
+      node_modules/react-native-screens/android/build/
+      node_modules/react-native-screens/android/.cxx/
+  - Ran gradlew clean before rebuild
+
+VERIFICATION:
+✓ Build completes successfully
+✓ App launches on device (R5CY34M2W7Z)
+✓ @react-navigation/native-stack native view managers resolve correctly
+
+PERSISTENCE:
+- Patch file written manually to patches/react-native-screens+4.23.0.patch
+  (patch-package could not auto-generate diff — git not in system PATH)
+- Patch will be applied automatically via postinstall script on npm install
+
+NOTES:
+This is the same root cause as Patch 1. Any react-native library that uses
+CMake + native C++ under React Native 0.84.0 new architecture may need the
+same c++_shared fix if it fails with these linker errors.
+
+================================================================================
+

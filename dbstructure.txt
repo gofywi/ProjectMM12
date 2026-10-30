@@ -1,0 +1,159 @@
+DATABASE STRUCTURE
+==================
+
+1. SQLITE
+=========
+
+Database file: byte.db
+Location: Default application database location on the user's device
+
+
+TABLE: sessions
+---------------
+Purpose:
+Stores one record for each chat or document session.
+
+Columns:
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+  Local session ID.
+
+- title TEXT NOT NULL
+  Session title. A new session normally uses the first user message as its title.
+
+- created_at TEXT NOT NULL
+  Date and time when the session was created, stored as an ISO date string.
+
+- updated_at TEXT NOT NULL
+  Date and time of the latest message in the session, stored as an ISO date string.
+
+- personality_id TEXT NULL
+  Optional personality ID used by the session.
+
+- document_name TEXT NULL
+  Optional name of the document used by the session.
+  This column is added by a database migration.
+
+Index:
+- idx_sessions_updated ON sessions(updated_at DESC)
+
+Notes:
+- message_count is calculated when sessions are read. It is not stored as a column.
+- The original document and extracted document text are not stored in this table.
+
+
+TABLE: messages
+---------------
+Purpose:
+Stores the user and assistant messages for each session.
+
+Columns:
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+  Local message ID.
+
+- session_id INTEGER NOT NULL
+  ID of the session containing the message.
+
+- role TEXT NOT NULL
+  Allowed values: user or assistant.
+
+- content TEXT NOT NULL
+  Complete message text.
+
+- timestamp TEXT NOT NULL
+  Date and time when the message was created, stored as an ISO date string.
+
+Constraints:
+- CHECK(role IN ('user', 'assistant'))
+- FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+
+Index:
+- idx_messages_session_timestamp ON messages(session_id, timestamp)
+
+Behavior:
+- Saving a message also updates sessions.updated_at.
+- Deleting a session deletes all of its messages.
+
+
+TABLE: memories
+---------------
+Purpose:
+Stores one generated memory summary for a session.
+
+Columns:
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+  Local memory ID.
+
+- session_id INTEGER NOT NULL UNIQUE
+  ID of the related session. UNIQUE allows only one memory record per session.
+
+- summary TEXT NOT NULL
+  Generated memory or conversation summary.
+
+- metadata TEXT NOT NULL
+  JSON text containing:
+  - message_count: number of messages
+  - session_title: title of the session
+
+- created_at TEXT NOT NULL
+  Date and time when the memory was saved, stored as an ISO date string.
+
+Constraints:
+- UNIQUE(session_id)
+- FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+
+Index:
+- idx_memories_created ON memories(created_at DESC)
+
+Behavior:
+- Saving another memory for the same session replaces the existing memory.
+- Deleting a session deletes its related memory.
+
+Current implementation note:
+- The memories table and save method exist, but the active chat flow does not currently call the save-memory method.
+
+
+VIRTUAL TABLE: messages_fts
+---------------------------
+Purpose:
+Provides full-text search for saved messages when SQLite FTS5 is available.
+
+Fields:
+- session_id UNINDEXED
+- role UNINDEXED
+- content
+- timestamp UNINDEXED
+
+Configuration:
+- External content table: messages
+- Content row ID: messages.id
+
+Triggers:
+- messages_fts_insert
+  Adds a search record after a message is inserted.
+
+- messages_fts_delete
+  Removes the search record after a message is deleted.
+
+- messages_fts_update
+  Replaces the search record after a message is updated.
+
+Note:
+- This virtual table is optional because FTS5 may not be available on every device.
+
+
+RELATIONSHIPS
+-------------
+- sessions 1 -> many messages
+- sessions 1 -> zero or one memory
+- Deleting a session cascades to its messages and memory.
+
+
+DATA CURRENTLY KEPT ONLY IN MEMORY
+----------------------------------
+- Extracted document text is kept temporarily in application memory while the document chat is open.
+- The original PDF, DOCX, or TXT file is not copied into byte.db.
+- Only the document name is stored in sessions.document_name.
+- Reopening a saved session restores its messages and document name, but not the extracted document text.
+
+
+

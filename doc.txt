@@ -1,0 +1,381 @@
+================================================================================
+SUMZAI aka BYTE PROJECT DOCUMENTATION
+================================================================================
+
+PROJECT: Byte
+VERSION: 0.0.1
+REACT NATIVE: 0.84.0
+NODE: >= 22.11.0
+
+=============================================================================
+BYTE — OFFLINE DOCUMENT SUMMARIZER
+=============================================================================
+
+PROJECT OVERVIEW:
+Offline document summarization & chat app built with React Native for Android.
+The user uploads a .docx, .pdf, or .txt file and the app produces a concise
+summary / Q&A entirely on-device using the LiquidAI LFM 1.2B model (Q4_K_M
+quantized), powered by llama.cpp via the llama.rn library. No internet
+connection or cloud API is ever used.
+
+Core flow:
+  1. User picks a .docx, .pdf, or .txt from device storage
+  2. App extracts plain text from the file (client-side, no server)
+  3. Text is chunked if it exceeds the model's context window
+  4. LFM 1.2B generates a summary for each chunk, then a final merged summary
+  5. Summary / chat is displayed on-screen
+  6. All chat sessions are persisted to SQLite and accessible via the
+     in-app history drawer
+
+=============================================================================
+DEPENDENCIES
+=============================================================================
+
+  1. llama.rn                    - React Native bindings for llama.cpp
+                                   (on-device LLM inference)
+  2. react-native-fs             - File system access (asset copy, file reads)
+  3. @types/react-native-fs      - TypeScript definitions for react-native-fs
+  4. @react-native-documents/picker - Native file picker (.pdf, .docx, .txt)
+                                     Renamed successor to react-native-document-picker;
+                                     required for RN 0.78+. Named exports: pick, types, isErrorWithCode.
+  5. react-native-sqlite-storage - SQLite for chat session / message persistence
+  6. @react-navigation/native           - React Navigation core
+  7. @react-navigation/native-stack     - Native stack navigator
+  8. react-native-screens               - Native screen primitive (peer dep of native-stack)
+                                         Requires c++_shared CMake patch — see patch.txt
+
+  Document parsing (native bridge — zero external deps):
+    .pdf  — PdfTextExtractorModule.kt  (native Kotlin, Apache PDFBox)
+    .docx — DocxTextExtractorModule.kt (native Kotlin, ZipInputStream + XmlPullParser)
+            No Apache POI needed — uses Android built-ins only.
+            Reads word/document.xml inside the OOXML ZIP archive.
+            Handles paragraphs, line breaks, tabs, and tables (cells joined with " | ").
+            Supports content://, file://, and absolute path URIs.
+    .txt  — TxtTextExtractorModule.kt  (native Kotlin, raw byte read)
+            Decodes as UTF-8; falls back to ISO-8859-1 for Windows-1252 files.
+            Supports content://, file://, and absolute path URIs.
+
+=============================================================================
+FILE STRUCTURE
+=============================================================================
+
+### Model Files:
+  src/Model/LiquidAI_LFM2.5-1.2B-Instruct-Q4_K_M.gguf   (~1.2GB) - summarizer model
+
+  android/app/src/main/assets/model.gguf                  - bundled model
+
+  Runtime (copied from assets on first launch, persists across restarts):
+  /data/user/0/com.byte/files/model.gguf
+
+### Provider / Config:
+  src/provider/ModelTemplate.ts    - BASE_SYSTEM_PROMPT (document summarizer rules)
+  src/provider/Parameter.ts        - inference parameters (n_predict, temperature, etc.)
+
+### Services:
+  src/services/LlamaService.ts     - LLM lifecycle + response generation (streaming)
+  src/services/DocumentService.ts  - file picking, text extraction, context truncation
+  src/services/DatabaseService.ts  - SQLite singleton (byte.db, sessions + messages)
+
+### Native Modules (Android):
+  android/app/src/main/java/com/byteapp/
+    PdfTextExtractorModule.kt      - extracts text from PDF via Apache PDFBox
+    PdfTextExtractorPackage.kt     - registers PdfTextExtractor with React Native
+    DocxTextExtractorModule.kt     - extracts text from DOCX (ZipInputStream + XmlPullParser)
+    DocxTextExtractorPackage.kt    - registers DocxTextExtractor with React Native
+    TxtTextExtractorModule.kt      - reads plain-text files (UTF-8 / ISO-8859-1 fallback)
+    TxtTextExtractorPackage.kt     - registers TxtTextExtractor with React Native
+    MainApplication.kt             - adds all three packages to the RN package list
+
+  Module names (accessed via NativeModules):
+    NativeModules.PdfTextExtractor  → .extractText(uri): Promise<string>
+    NativeModules.DocxTextExtractor → .extractText(uri): Promise<string>
+    NativeModules.TxtTextExtractor  → .extractText(uri): Promise<string>
+
+### UI:
+  src/screen/HomeScreen.tsx        - landing screen: upload button + animated hero
+  src/screen/ChatScreen.tsx        - LLM chat interface with streaming responses
+                                     + slide-in history drawer (Modal-based)
+  src/screen/MemoryScreen.tsx      - view/delete stored session memories
+  src/screen/SettingScreen.tsx     - settings hub
+
+### Navigation:
+  App.tsx — NavigationContainer wrapping NativeStack
+             ThemeProvider + ToastProvider wrap the entire navigator
+
+  Screens registered in RootStackParamList:
+    Home     → HomeScreen     (initial route)
+    Chat     → ChatScreen
+    Memory   → MemoryScreen
+    Settings → SettingScreen
+
+=============================================================================
+HOW IT WORKS — FULL FLOW
+=============================================================================
+
+### 1. App Launch
+HomeScreen mounts and initializes the model:
+  a) LlamaService.initialize()    - copies model.gguf from assets if needed,
+                                    initializes llama.cpp context (~5-15s)
+  b) DatabaseService.initialize() - opens byte.db, creates tables if needed,
+                                    runs any pending migrations
+
+  First launch: ~30s (model copy). Subsequent: 5-15s (model load).
+
+### 2. Picking a Document
+  a) User taps "Upload Document" button on HomeScreen
+  b) @react-native-documents/picker opens the native file picker
+     (filtered to PDF, DOCX, and TXT MIME types via DocumentService.pickDocument())
+  c) DocumentService.extractTextFromDocument(uri, type) called:
+       .pdf  → PdfTextExtractorModule.kt  (Apache PDFBox, native Kotlin)
+       .docx → DocxTextExtractorModule.kt (ZipInputStream + XmlPullParser, no deps)
+       .txt  → TxtTextExtractorModule.kt  (raw byte read, UTF-8/ISO-8859-1 fallback)
+  d) Raw text returned and truncated to MAX_CONTEXT_CHARS (28 000 chars ≈ 7 000 tokens)
+     to ensure it fits within the 32K context window alongside the system prompt
+
+### 3. Chat Session
+  a) User navigates to ChatScreen with documentText + documentName route params
+  b) Header shows the document name badge
+  c) Quick-action chips appear (Summarize / Key points / Explain)
+  d) User sends a message → LlamaService.generateResponseStream() streams reply
+  e) On first message, DatabaseService.createSession(title, documentName) is called
+     — stores the session title (first message) and document_name in SQLite
+  f) Every user + assistant message is saved via DatabaseService.saveMessage()
+
+### 4. History Drawer
+  Accessible via the ☰ menu icon in the ChatScreen header.
+
+  Implementation:
+    - Rendered inside a React Native Modal (transparent, animationType="none")
+    - Using Modal avoids the Android useNativeDriver hit-test offset bug where
+      translateX-animated views receive touches at their original off-screen position
+    - Backdrop: full-screen Animated.View with pointerEvents="none" (visual only)
+    - Close zone: TouchableOpacity covering only the area to the right of the drawer
+    - Drawer panel: Animated.View sliding in from the left (spring animation,
+      tension: 180, friction: 20 for fast settle)
+
+  Session list row layout:
+    [icon]  First message text (item.title, truncated)
+            document_name (max 20 chars + …)  ·  N msgs
+
+  Actions:
+    - Tap row → loadSession(): loads messages from DB, restores chat state,
+                               restores document name in header
+    - Long-press → deleteSessionFromDB(): Alert confirmation + DB delete
+    - ✏️ icon in drawer header → new chat (resets state, closes drawer)
+    - × icon / tap backdrop area → closes drawer
+
+### 5. Model Configuration
+
+  Main Model (LFM 1.2B):
+    n_ctx:        32768  (32K context window)
+    n_gpu_layers: 0      (CPU-only for stability)
+    use_mlock:    false
+
+  Inference Parameters (src/provider/Parameter.ts):
+    n_predict:      1024   (max summary tokens)
+    temperature:    0.3    (low — factual, deterministic output preferred)
+    top_k:          40
+    top_p:          0.95
+    min_p:          0.05
+    xtc_threshold:  0.05
+    xtc_probability:0
+    typical_p:      1
+    penalty_last_n: 64
+    seed:           -1
+
+=============================================================================
+CHUNKING STRATEGY
+=============================================================================
+
+Problem: Documents frequently exceed the 32K context window once a system
+prompt and output tokens are accounted for.
+
+Strategy:
+  CHUNK_SIZE_CHARS = 8000   (approx 2000 tokens at ~4 chars/token)
+  TOKEN_BUDGET     = 28000  (32768 − system_prompt − output_reserve)
+
+  DocumentService.chunkText(text):
+    - Splits on paragraph boundaries (double newline) where possible
+    - Falls back to character-limit split if a single paragraph is too long
+    - Returns string[]
+
+  If chunks.length === 1 → single-pass summarization
+  If chunks.length  >  1 → map-reduce summarization:
+      Pass 1: summarize each chunk independently (parallel or sequential)
+      Pass 2: concatenate chunk summaries → final merged summary prompt
+
+=============================================================================
+SYSTEM PROMPT ARCHITECTURE
+=============================================================================
+
+  File: src/provider/SummaryTemplate.ts
+
+  Single-purpose prompt — no persona system needed:
+    "You are a precise document summarizer. Given the following document text,
+     produce a clear, concise summary covering the key points. Do not add
+     information not present in the document. Do not use bullet points unless
+     they appear in the original. Keep the summary under 300 words."
+
+  Merge prompt (used in multi-chunk pass 2):
+    "You have been given partial summaries of sections of a longer document.
+     Combine them into a single coherent summary under 400 words, preserving
+     all key information and eliminating redundancy."
+
+=============================================================================
+DATABASE SCHEMA
+=============================================================================
+
+Database: byte.db (SQLite, location: app databases/ directory)
+
+Tables:
+
+  sessions
+    id             INTEGER PRIMARY KEY AUTOINCREMENT
+    title          TEXT NOT NULL           (first user message, truncated to 100 chars)
+    created_at     TEXT NOT NULL           (ISO 8601)
+    updated_at     TEXT NOT NULL           (ISO 8601, updated on every new message)
+    personality_id TEXT                    (reserved, unused in current build)
+    document_name  TEXT                    (original filename — added via ALTER TABLE migration)
+
+  messages
+    id             INTEGER PRIMARY KEY AUTOINCREMENT
+    session_id     INTEGER NOT NULL        (FK → sessions.id ON DELETE CASCADE)
+    role           TEXT NOT NULL           ('user' | 'assistant')
+    content        TEXT NOT NULL
+    timestamp      TEXT NOT NULL           (ISO 8601)
+
+  messages_fts   (FTS5 virtual table — optional, falls back gracefully if unavailable)
+    Mirrors messages table for full-text search via MATCH queries.
+    Kept in sync via INSERT/DELETE/UPDATE triggers.
+
+  memories
+    id             INTEGER PRIMARY KEY AUTOINCREMENT
+    session_id     INTEGER NOT NULL UNIQUE (FK → sessions.id ON DELETE CASCADE)
+    summary        TEXT NOT NULL
+    metadata       TEXT NOT NULL           (JSON: { message_count, session_title })
+    created_at     TEXT NOT NULL           (ISO 8601)
+
+Indexes:
+  idx_sessions_updated              ON sessions(updated_at DESC)
+  idx_messages_session_timestamp    ON messages(session_id, timestamp)
+  idx_memories_created              ON memories(created_at DESC)
+
+Key design decisions:
+  - document_name added as a nullable column via ALTER TABLE migration so existing
+    installs are not broken (migration wrapped in try/catch)
+  - createSession(title, documentName?, personalityId?) — documentName is the
+    second argument and is stored in the document_name column
+  - getAllSessions() returns document_name alongside message_count for the drawer
+
+=============================================================================
+KNOWN ANDROID GOTCHAS
+=============================================================================
+
+1. useNativeDriver + translateX hit-test offset bug
+   When a view is animated with useNativeDriver: true and a translateX transform,
+   Android's touch hit-testing uses the view's ORIGINAL (pre-animation) position.
+   Result: a view that visually slides in is untouchable at its visual location.
+   Fix: Render the animated drawer inside a <Modal transparent> — Modal creates a
+   new Android Window where touch areas always match visual positions.
+
+2. FlatList touch delay inside animated views
+   FlatList has its own scroll pan-responder that competes with child TouchableOpacity
+   presses, adding ~100-300ms latency on Android.
+   Fix: Replace FlatList with ScrollView + .map() for short lists (history drawer).
+
+=============================================================================
+PERFORMANCE SUMMARY
+=============================================================================
+
+  Main model load:      5-15s (first launch: ~30s for asset copy)
+  Single-chunk summary: 5-20s (depends on document length)
+  Multi-chunk summary:  per-chunk × N + final merge pass
+
+  Text extraction:      near-instant (native Kotlin)
+  Chunking:             O(n) string split, ~1ms
+  DB write (message):   O(log n) index insert
+
+  RAM footprint:        model uses ~700MB during inference (Q4_K_M)
+
+=============================================================================
+ANDROID CONFIGURATION
+=============================================================================
+
+  Min SDK:          24
+  Target SDK:       36
+  Compile SDK:      36
+  NDK:              27.1.12297006
+  Gradle:           9.0.0
+  New Architecture: ENABLED (newArchEnabled=true)
+  Hermes:           ENABLED
+
+=============================================================================
+APPLIED PATCHES (patch-package)
+=============================================================================
+
+Patches auto-applied via postinstall script. Files in patches/ directory.
+
+1. react-native-safe-area-context v5.5.2
+   - Fixed CMake build errors by adding c++_shared library linkage
+   - See patch.txt PATCH 1 for details
+
+2. react-native-screens v4.23.0
+   - Added as explicit dependency (peer dep of @react-navigation/native-stack)
+   - Same C++ stdlib linker error as #1, but required fixes in TWO CMakeLists.txt:
+       android/CMakeLists.txt (rnscreens target — RNScreensTurboModule.cpp)
+       android/src/main/jni/CMakeLists.txt (react_codegen_rnscreens target)
+   - Patch file written manually (git not in PATH, patch-package auto-gen failed)
+   - See patch.txt PATCH 2 for details
+
+=============================================================================
+REACT NATIVE VECTOR ICONS — ANDROID SETUP
+=============================================================================
+
+Library: react-native-vector-icons v10.x
+Icons used: Feather (react-native-vector-icons/Feather)
+
+CORRECT FIX — add this line to android/app/build.gradle:
+  apply from: "../../node_modules/react-native-vector-icons/fonts.gradle"
+
+  This copies all .ttf font files into the APK's assets/fonts/ directory
+  during the Gradle build pipeline.
+
+After adding this line, do a clean build:
+  cd android
+  .\gradlew clean
+  cd ..
+  npx react-native run-android
+
+=============================================================================
+FEATURE BACKLOG
+=============================================================================
+
+   DONE
+  - Pick document (.pdf / .docx / .txt) and chat with AI about it     ← CORE
+  - Chat history drawer — slide-in panel listing all past sessions
+    - Tap to restore any previous conversation
+    - Long-press to delete a session
+    - New chat button inside the drawer
+    - Shows: first message · doc name (≤20 chars) · message count
+
+  📋 PLANNED
+  - Copy summary / response to clipboard
+  - Export chat as .txt file
+
+  📋 CONSIDERING
+  - Summary length control (Brief / Standard / Detailed)
+  - Key points extraction — bullet-point mode alongside prose summary
+  - Multi-language support — detect document language, summarize in same lang
+  - Progress indicator for multi-chunk documents (chunk X of N)
+  - Search across saved sessions (FTS5 already scaffolded in DB)
+
+=============================================================================
+FUTURE ENHANCEMENTS
+=============================================================================
+  - Enable GPU acceleration (n_gpu_layers: 32) for 2-3x faster inference
+  - Streaming summary output (token-by-token display)
+  - Model download/update UI
+  - Support additional file types (.epub, image OCR)
+  - Share summary via Android share sheet
+
+================================================================================
